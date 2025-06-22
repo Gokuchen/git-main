@@ -1,0 +1,131 @@
+import pandas as pd
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
+import warnings
+warnings.filterwarnings('ignore')
+
+def extract_iot_features(data, label=None):
+    """
+    Extract comprehensive network traffic features for IoT profiling
+    
+    Args:
+        data (pd.DataFrame): Raw network traffic data
+        label (int): Label for the data (0 for benign, 1 for attack)
+    
+    Returns:
+        pd.DataFrame: Extracted features
+    """
+    features = pd.DataFrame()
+    
+    # Time-based features for temporal analysis
+    features['time_diff'] = data['Time'].diff().fillna(0)
+    features['time_normalized'] = (data['Time'] - data['Time'].min()) / (data['Time'].max() - data['Time'].min() + 1e-8)
+    
+    # Protocol encoding for categorical data
+    protocol_encoder = LabelEncoder()
+    features['protocol_encoded'] = protocol_encoder.fit_transform(data['Protocol'])
+    
+    # IP address features for communication patterns
+    def extract_ip_features(ip_series):
+        ip_features = pd.DataFrame()
+        ip_features['unique_count'] = [len(ip_series.unique())] * len(ip_series)
+        ip_counts = ip_series.value_counts()
+        ip_features['ip_frequency'] = ip_series.map(ip_counts)
+        return ip_features
+    
+    src_features = extract_ip_features(data['Source'])
+    dst_features = extract_ip_features(data['Destination'])
+    
+    features['src_unique_count'] = src_features['unique_count']
+    features['src_frequency'] = src_features['ip_frequency']
+    features['dst_unique_count'] = dst_features['unique_count']
+    features['dst_frequency'] = dst_features['ip_frequency']
+    
+    # Packet length features
+    if 'Length' in data.columns:
+        features['packet_length'] = data['Length']
+        features['length_normalized'] = (data['Length'] - data['Length'].min()) / (data['Length'].max() - data['Length'].min() + 1e-8)
+    else:
+        # Default lengths based on protocol for missing data
+        protocol_lengths = {'TCP': 74, 'UDP': 64, 'DNS': 75, 'TLSv1': 156, 'TLSv1.2': 97, 'HTTP': 200, 'ICMP': 64}
+        features['packet_length'] = data['Protocol'].map(protocol_lengths).fillna(100)
+        features['length_normalized'] = (features['packet_length'] - features['packet_length'].min()) / (features['packet_length'].max() - features['packet_length'].min() + 1e-8)
+    
+    # Statistical features over sliding windows
+    window_size = min(5, len(data))
+    
+    # Rolling statistics for time differences
+    features['time_diff_mean'] = features['time_diff'].rolling(window=window_size, min_periods=1).mean()
+    features['time_diff_std'] = features['time_diff'].rolling(window=window_size, min_periods=1).std().fillna(0)
+    
+    # Rolling statistics for packet lengths
+    features['length_mean'] = features['packet_length'].rolling(window=window_size, min_periods=1).mean()
+    features['length_std'] = features['packet_length'].rolling(window=window_size, min_periods=1).std().fillna(0)
+    
+    # Behavioral patterns - protocol diversity
+    protocol_diversity = []
+    for i in range(len(data)):
+        start_idx = max(0, i - window_size + 1)
+        end_idx = i + 1
+        unique_protocols = data['Protocol'].iloc[start_idx:end_idx].nunique()
+        protocol_diversity.append(unique_protocols)
+    features['protocol_diversity'] = protocol_diversity
+    
+    # Communication patterns for bidirectional analysis
+    features['bidirectional_comm'] = 0
+    for i in range(1, len(data)):
+        if (data.iloc[i]['Source'] == data.iloc[i-1]['Destination'] and 
+            data.iloc[i]['Destination'] == data.iloc[i-1]['Source']):
+            features.iloc[i, features.columns.get_loc('bidirectional_comm')] = 1
+    
+    # Flow-level features for traffic characterization
+    features['packet_rate'] = 1.0 / (features['time_diff'] + 1e-8)
+    features['bytes_per_second'] = features['packet_length'] / (features['time_diff'] + 1e-8)
+    features['inter_arrival_time'] = features['time_diff']
+    
+    # Add label if provided
+    if label is not None:
+        features['label'] = label
+    
+    return features
+
+def create_sequences(data, sequence_length=10):
+    """
+    Create sequences for temporal analysis in CNN-LSTM model
+    
+    Args:
+        data (pd.DataFrame): Feature data
+        sequence_length (int): Length of each sequence
+    
+    Returns:
+        tuple: (sequences, labels, scaler)
+    """
+    # Remove label for feature processing
+    if 'label' in data.columns:
+        labels = data['label'].values
+        features = data.drop('label', axis=1)
+    else:
+        labels = None
+        features = data
+    
+    # Normalize features for better model performance
+    scaler = StandardScaler()
+    features_scaled = scaler.fit_transform(features)
+    
+    # Create overlapping sequences for temporal modeling
+    sequences = []
+    sequence_labels = []
+    
+    for i in range(len(features_scaled) - sequence_length + 1):
+        seq = features_scaled[i:i+sequence_length]
+        sequences.append(seq)
+        if labels is not None:
+            sequence_labels.append(labels[i+sequence_length-1])
+    
+    return np.array(sequences), np.array(sequence_labels), scale
