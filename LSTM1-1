@@ -1,0 +1,295 @@
+import os
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+import pandas as pd
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+
+def main_iot_profiling_implementation():
+    """
+    #Complete IoT profiling implementation using CNN-BiLSTM
+    #Processing actual network traffic data from camera device
+    """
+    print("=== IoT Profiling with CNN-BiLSTM - Real Network Traffic Analysis ===")
+    
+    # Step 1: Load the actual IoT network traffic data
+    print("1. Loading IoT network traffic data...")
+    
+    try:
+        # Load benign IoT profile data
+        benign_data = pd.read_excel('/content/18-Oct-29-Benign.xlsx')
+        print(f"Loaded benign data: {benign_data.shape}")
+        
+        # Load attack traffic data
+        attack_data = pd.read_excel('/content/18-Jun-01-Time2.xlsx')
+        print(f"Loaded attack data: {attack_data.shape}")
+        
+    except FileNotFoundError as e:
+        print(f"Error loading data files: {e}")
+        print("Please ensure the Excel files are in the current directory")
+        return None
+    
+    # Step 2: Feature extraction from network traffic
+    print("2. Extracting IoT network traffic features...")
+    
+    # Extract features from benign traffic (label=0)
+    benign_features = extract_iot_network_features(benign_data, label=0)
+    print(f"Benign features shape: {benign_features.shape}")
+    
+    # Extract features from attack traffic (label=1)
+    attack_features = extract_iot_network_features(attack_data, label=1)
+    print(f"Attack features shape: {attack_features.shape}")
+    
+    # Step 3: Data balancing and combination
+    print("3. Balancing and combining datasets...")
+    
+    # Balance the datasets to prevent bias
+    min_samples = min(len(benign_features), len(attack_features))
+    benign_features_balanced = benign_features.sample(n=min_samples, random_state=42)
+    attack_features_balanced = attack_features.sample(n=min_samples, random_state=42)
+    
+    # Combine datasets
+    combined_features = pd.concat([benign_features_balanced, attack_features_balanced], 
+                                 ignore_index=True)
+    
+    # Shuffle the combined dataset
+    combined_features = combined_features.sample(frac=1, random_state=42).reset_index(drop=True)
+    print(f"Combined balanced dataset shape: {combined_features.shape}")
+
+print("1. Loading IoT network traffic data...")
+    
+    
+        # Load benign IoT profile data
+    benign_data = pd.read_excel('/content/18-Oct-29-Benign.xlsx')
+    print(f"Loaded benign data: {benign_data.shape}")
+        
+        # Load attack traffic data
+    attack_data = pd.read_excel('/content/18-Jun-01-Time2.xlsx')
+    print(f"Loaded attack data: {attack_data.shape}")
+        
+    
+    # Step 2: Feature extraction from network traffic
+    print("2. Extracting IoT network traffic features...")
+    
+    # Extract features from benign traffic (label=0)
+    benign_features = extract_iot_network_features(benign_data, label=0)
+    print(f"Benign features shape: {benign_features.shape}")
+    
+    # Extract features from attack traffic (label=1)
+    attack_features = extract_iot_network_features(attack_data, label=1)
+    print(f"Attack features shape: {attack_features.shape}")
+    
+    # Step 3: Data balancing and combination
+    print("3. Balancing and combining datasets...")
+    
+    # Balance the datasets to prevent bias
+    min_samples = min(len(benign_features), len(attack_features))
+    benign_features_balanced = benign_features.sample(n=min_samples, random_state=42)
+    attack_features_balanced = attack_features.sample(n=min_samples, random_state=42)
+    
+    # Combine datasets
+    combined_features = pd.concat([benign_features_balanced, attack_features_balanced], 
+                                 ignore_index=True)
+    
+    # Shuffle the combined dataset
+    combined_features = combined_features.sample(frac=1, random_state=42).reset_index(drop=True)
+    print(f"Combined balanced dataset shape: {combined_features.shape}")
+
+import pandas as pd
+import numpy as np
+def augment_features(features, labels, augmentation_factor=1):
+    """
+    Apply data augmentation to increase dataset diversity at the feature level.
+
+    Args:
+        features (np.array): Input features (numpy array).
+        labels (np.array): Corresponding labels.
+        augmentation_factor (int): How many augmented versions per sample.
+
+    Returns:
+        tuple: (augmented_features, augmented_labels)
+    """
+    augmented_features = []
+    augmented_labels = []
+
+    # Original data
+    augmented_features.extend(features)
+    augmented_labels.extend(labels)
+
+    for _ in range(augmentation_factor):
+        for i, (feat, label) in enumerate(zip(features, labels)):
+            # Add small gaussian noise to features
+            noise = np.random.normal(0, 0.005, feat.shape) # Smaller noise std for feature level
+            augmented_feat = feat + noise
+            # Ensure values stay within a reasonable range (assuming features were scaled)
+            augmented_feat = np.clip(augmented_feat, 0, 1)
+
+            augmented_features.append(augmented_feat)
+            augmented_labels.append(label)
+
+    return np.array(augmented_features), np.array(augmented_labels)
+
+
+def main_iot_profiling_implementation():
+    """
+    Complete IoT profiling implementation using CNN-BiLSTM
+    Processing actual network traffic data from camera device
+    """
+    print("=== IoT Profiling with CNN-BiLSTM - Real Network Traffic Analysis ===")
+
+    # Step 1: Load the actual IoT network traffic data
+    print("1. Loading IoT network traffic data...")
+
+    try:
+        # Load benign IoT profile data
+        benign_data = pd.read_excel('/content/18-Oct-29-Benign.xlsx')
+        print(f"Loaded benign data: {benign_data.shape}")
+
+        # Load attack traffic data
+        attack_data = pd.read_excel('/content/18-Jun-01-Time2.xlsx')
+        print(f"Loaded attack data: {attack_data.shape}")
+
+    except FileNotFoundError as e:
+        print(f"Error loading data files: {e}")
+        print("Please ensure the Excel files are in the current directory")
+        return None
+
+    # Step 2: Feature extraction from network traffic
+    print("2. Extracting IoT network traffic features...")
+
+    # Extract features from benign traffic (label=0)
+    benign_features = extract_iot_network_features(benign_data, label=0)
+    print(f"Benign features shape: {benign_features.shape}")
+
+    # Extract features from attack traffic (label=1)
+    attack_features = extract_iot_network_features(attack_data, label=1)
+    print(f"Attack features shape: {attack_features.shape}")
+
+    # Step 3: Data balancing and combination
+    print("3. Balancing and combining datasets...")
+
+    # Balance the datasets to prevent bias
+    min_samples = min(len(benign_features), len(attack_features))
+    benign_features_balanced = benign_features.sample(n=min_samples, random_state=42)
+    attack_features_balanced = attack_features.sample(n=min_samples, random_state=42)
+
+    # Combine datasets
+    combined_features_df = pd.concat([benign_features_balanced, attack_features_balanced],
+                                 ignore_index=True)
+
+    # Shuffle the combined dataset
+    combined_features_df = combined_features_df.sample(frac=1, random_state=42).reset_index(drop=True)
+    print(f"Combined balanced dataset shape: {combined_features_df.shape}")
+
+    # Separate features and labels for scaling and sequence creation
+    labels_df = combined_features_df['label']
+    features_df = combined_features_df.drop('label', axis=1)
+
+    # Step 4: Scale features
+    print("4. Scaling features...")
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    features_scaled = scaler.fit_transform(features_df)
+    labels_np = labels_df.values
+
+    # Step 5: Apply Data Augmentation
+    print("5. Applying Data Augmentation...")
+    # Augment at the feature level before creating sequences
+    augmented_features_scaled, augmented_labels_np = augment_features(features_scaled, labels_np, augmentation_factor=2)
+    print(f"Augmented features shape: {augmented_features_scaled.shape}")
+    print(f"Augmented labels shape: {augmented_labels_np.shape}")
+
+
+    # Step 6: Create Temporal Sequences for CNN-BiLSTM
+    print("6. Creating temporal sequences...")
+    sequence_length = 15 # Define sequence length
+    # Note: Sequence creation expects a DataFrame for the 'data' argument
+    # We will pass the augmented scaled features as a DataFrame for sequence creation
+    # However, the `create_temporal_sequences` function is designed to work on
+    # original feature dataframes, and its scaling and sequence creation logic
+    # are tightly coupled. We need to modify or re-use it carefully.
+
+    # Let's slightly adjust create_temporal_sequences to accept scaled numpy array
+    # or create sequences directly from the augmented numpy arrays.
+    # Modifying the function or creating a new one is better.
+    # For simplicity here, let's create sequences from the augmented numpy array directly.
+
+    sequences = []
+    sequence_labels = []
+
+    for i in range(len(augmented_features_scaled) - sequence_length + 1):
+        seq = augmented_features_scaled[i:i+sequence_length]
+        sequences.append(seq)
+        # Use the label of the last time step in the sequence
+        sequence_labels.append(augmented_labels_np[i+sequence_length-1])
+
+    sequences_np = np.array(sequences)
+    sequence_labels_np = np.array(sequence_labels)
+
+    print(f"Created {len(sequences_np)} sequences of length {sequence_length}.")
+    print(f"Sequences shape: {sequences_np.shape}")
+    print(f"Sequence labels shape: {sequence_labels_np.shape}")
+
+
+    # Step 7: Split data into training, validation, and test sets
+    print("7. Splitting data into train, val, test sets...")
+    X_train_val, X_test, y_train_val, y_test = train_test_split(
+        sequences_np, sequence_labels_np, test_size=0.2, random_state=42, stratify=sequence_labels_np
+    )
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_train_val, y_train_val, test_size=0.25, random_state=42, stratify=y_train_val
+    ) # 0.25 * 0.8 = 0.2 of total data for validation
+
+    print(f"Training sequences shape: {X_train.shape}")
+    print(f"Validation sequences shape: {X_val.shape}")
+    print(f"Test sequences shape: {X_test.shape}")
+    print(f"Training labels shape: {y_train.shape}")
+    print(f"Validation labels shape: {y_val.shape}")
+    print(f"Test labels shape: {y_test.shape}")
+
+
+    # Step 8: Create PyTorch DataLoaders
+    print("8. Creating PyTorch DataLoaders...")
+    batch_size = 64 # Or adjust based on your GPU memory
+
+    train_dataset = TensorDataset(torch.Tensor(X_train), torch.Tensor(y_train))
+    val_dataset = TensorDataset(torch.Tensor(X_val), torch.Tensor(y_val))
+    test_dataset = TensorDataset(torch.Tensor(X_test), torch.Tensor(y_test))
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    print(f"Train loader batches: {len(train_loader)}")
+    print(f"Val loader batches: {len(val_loader)}")
+    print(f"Test loader batches: {len(test_loader)}")
+
+    # Step 9: Initialize the Model
+    print("9. Initializing the CNN-BiLSTM Model...")
+    input_dimension = X_train.shape[2] # Number of features per time step
+    num_classes = len(np.unique(sequence_labels_np))
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
+
+    model = CNNBiLSTMIoTProfiler(
+        input_dim=input_dimension,
+        sequence_length=sequence_length,
+        conv_filters=64,
+        lstm_hidden=128,
+        num_classes=num_classes,
+        dropout=0.4,
+        num_cnn_layers=2
+    ).to(device)
+
+    print("Model architecture initialized.")
+
+
+    
+
+# Run the main implementation
+main_iot_profiling_implementation()
