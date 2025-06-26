@@ -1,0 +1,839 @@
+#!/usr/bin/env python3
+"""
+Complete ICMP Attack Detection System with Enhanced Model Saving
+- Real-time ICMP traffic analysis
+- SVM-based machine learning classification
+- Automatic model persistence with multiple backup paths
+- Manual training control via console commands
+"""
+
+from ryu.base import app_manager
+from ryu.controller import ofp_event
+from ryu.controller.handler import CONFIG_DISPATCHER, MAIN_DISPATCHER
+from ryu.controller.handler import set_ev_cls
+from ryu.ofproto import ofproto_v1_3
+from ryu.lib.packet import packet, ethernet, ipv4, icmp, arp
+import time
+import threading
+import os
+import json
+from collections import defaultdict
+import statistics
+import numpy as np
+from sklearn.svm import SVC
+from sklearn.metrics import classification_report, confusion_matrix
+import pickle
+import datetime
+
+class EnhancedICMPDetector(app_manager.RyuApp):
+    """
+    Enhanced ICMP detector with comprehensive model saving and loading
+    """
+    
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+    
+    def __init__(self, *args, **kwargs):
+        super(EnhancedICMPDetector, self).__init__(*args, **kwargs)
+        
+        # Enhanced file path management
+        self.setup_file_paths()
+        
+        # Core detection parameters
+        self.TIME_WINDOW = 3.0
+        self.NORMAL_THRESHOLD = 5
+        self.ATTACK_THRESHOLD = 8
+        
+        # Initialize data structures
+        self.initialize_data_structures()
+        
+        # Start background services
+        self.start_background_services()
+        
+        # Load existing model if available
+        self.load_model()
+        
+        self.logger.info("🚀 Enhanced ICMP Detector Initialized")
+        self.print_startup_info()
+
+    def setup_file_paths(self):
+        """Setup comprehensive file path management"""
+        # Primary paths
+        self.project_dir = "/home/goku/mininet/project"
+        self.model_file = os.path.join(self.project_dir, "icmp_svm_model.pkl")
+        self.model_metadata_file = os.path.join(self.project_dir, "model_metadata.json")
+        
+        # Backup paths
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.backup_dir = os.path.join(script_dir, "backup")
+        self.backup_model_file = os.path.join(self.backup_dir, "icmp_svm_model_backup.pkl")
+        self.backup_metadata_file = os.path.join(self.backup_dir, "model_metadata_backup.json")
+        
+        # Training data export paths
+        self.training_data_dir = os.path.join(self.project_dir, "training_data")
+        self.training_export_file = os.path.join(self.training_data_dir, "training_samples.json")
+        
+        # Ensure all directories exist
+        self.ensure_directories()
+
+    def ensure_directories(self):
+        """Create all required directories with proper permissions"""
+        directories = [
+            self.project_dir, 
+            self.backup_dir, 
+            self.training_data_dir
+        ]
+        
+        for directory in directories:
+            try:
+                if not os.path.exists(directory):
+                    os.makedirs(directory, mode=0o755)
+                    self.logger.info("📁 Created directory: %s", directory)
+                
+                # Test write permissions
+                test_file = os.path.join(directory, ".write_test")
+                with open(test_file, 'w') as f:
+                    f.write("test")
+                os.remove(test_file)
+                
+                self.logger.info("✅ Directory accessible: %s", directory)
+                
+            except Exception as e:
+                self.logger.error("❌ Directory setup failed %s: %s", directory, e)
+
+    def initialize_data_structures(self):
+        """Initialize all data structures"""
+        # Network data
+        self.mac_to_port = {}
+        self.blocked_ips = set()
+        
+        # ICMP statistics
+        self.icmp_stats = defaultdict(lambda: {
+            'packet_count': 0,
+            'total_length': 0,
+            'timestamps': [],
+            'packet_lengths': [],
+            'last_seen': time.time()
+        })
+        
+        # Machine learning components
+        self.classifier = None
+        self.is_trained = False
+        self.training_data = []
+        self.training_labels = []
+        self.model_metadata = {}
+        
+        # Training control
+        self.training_mode = False
+        self.current_label = 0
+        self.training_session_active = False
+        self.training_samples = 0
+        
+        # Statistics tracking
+        self.packet_counters = {
+            'total': 0,
+            'arp': 0,
+            'icmp': 0,
+            'ipv4': 0,
+            'blocked': 0,
+            'forwarded': 0,
+            'attacks_detected': 0,
+            'attacks_blocked': 0
+        }
+        
+        # Detection history
+        self.detection_history = []
+
+    def start_background_services(self):
+        """Start all background services"""
+        # Console command handler
+        self.command_thread = threading.Thread(target=self.handle_console_commands)
+        self.command_thread.daemon = True
+        self.command_thread.start()
+        
+        # Statistics reporter
+        self.stats_thread = threading.Thread(target=self.report_statistics)
+        self.stats_thread.daemon = True
+        self.stats_thread.start()
+        
+        # Data cleanup service
+        self.cleanup_thread = threading.Thread(target=self.cleanup_old_data)
+        self.cleanup_thread.daemon = True
+        self.cleanup_thread.start()
+        
+        # Model auto-save service
+        self.autosave_thread = threading.Thread(target=self.auto_save_service)
+        self.autosave_thread.daemon = True
+        self.autosave_thread.start()
+
+    def print_startup_info(self):
+        """Print comprehensive startup information"""
+        print("\n" + "="*70)
+        print("🎯 ENHANCED ICMP ATTACK DETECTION SYSTEM")
+        print("="*70)
+        print("📂 File Paths:")
+        print(f"   Primary model: {self.model_file}")
+        print(f"   Backup model:  {self.backup_model_file}")
+        print(f"   Training data: {self.training_export_file}")
+        print(f"   Metadata:      {self.model_metadata_file}")
+        
+        print("\n📋 Available Commands:")
+        print("   1 - Start normal traffic training")
+        print("   2 - Start attack traffic training")
+        print("   3 - Complete training and save model")
+        print("   4 - Show system status")
+        print("   5 - Test detection mode")
+        print("   6 - Export training data")
+        print("   7 - Load existing model")
+        print("   8 - Show model information")
+        
+        print("\n📚 Training Workflow:")
+        print("1. Type '1' → Generate normal traffic: h1 ping -c 15 h2")
+        print("2. Type '2' → Generate attack traffic: h3 hping3 -1 --faster -c 25 h2")
+        print("3. Type '3' → Complete training and auto-save")
+        print("4. Type '5' → Test with: h3 hping3 -1 --faster -c 20 h2")
+        print("="*70)
+
+    def handle_console_commands(self):
+        """Enhanced console command handling"""
+        while True:
+            try:
+                print(f"\n🎮 Enter command (1-8): ", end="")
+                command = input().strip()
+                
+                if command == "1":
+                    self.activate_normal_training()
+                elif command == "2":
+                    self.activate_attack_training()
+                elif command == "3":
+                    self.complete_training()
+                elif command == "4":
+                    self.show_comprehensive_status()
+                elif command == "5":
+                    self.test_detection_mode()
+                elif command == "6":
+                    self.export_training_data()
+                elif command == "7":
+                    self.load_model()
+                elif command == "8":
+                    self.show_model_info()
+                elif command.lower() in ["help", "h"]:
+                    self.print_startup_info()
+                elif command.lower() in ["quit", "exit", "q"]:
+                    break
+                else:
+                    print(f"❌ Unknown command: {command}")
+                    
+            except (EOFError, KeyboardInterrupt):
+                break
+            except Exception as e:
+                print(f"❌ Command error: {e}")
+
+    def activate_normal_training(self):
+        """Activate normal traffic training mode"""
+        self.training_mode = True
+        self.current_label = 0
+        self.training_session_active = True
+        
+        print("📚 NORMAL TRAFFIC TRAINING ACTIVATED")
+        print("💡 Generate normal traffic: h1 ping -c 15 -i 0.3 h2")
+        print("💡 Or: h2 ping -c 10 -i 0.5 h3")
+        
+        self.logger.info("📚 Normal traffic training activated")
+
+    def activate_attack_training(self):
+        """Activate attack traffic training mode"""
+        self.training_mode = True
+        self.current_label = 1
+        self.training_session_active = True
+        
+        print("📚 ATTACK TRAFFIC TRAINING ACTIVATED")
+        print("💡 Generate attack traffic: h3 hping3 -1 --faster -c 25 h2")
+        print("💡 Or: h1 hping3 -1 -i u50 -c 30 h2")
+        
+        self.logger.info("📚 Attack traffic training activated")
+
+    def complete_training(self):
+        """Complete training and save all data"""
+        self.training_mode = False
+        self.training_session_active = False
+        
+        total_samples = len(self.training_data)
+        normal_samples = sum(1 for label in self.training_labels if label == 0)
+        attack_samples = sum(1 for label in self.training_labels if label == 1)
+        
+        print(f"\n📚 Training Session Complete")
+        print(f"   Total samples: {total_samples}")
+        print(f"   Normal samples: {normal_samples}")
+        print(f"   Attack samples: {attack_samples}")
+        
+        if total_samples >= 6:
+            if self.train_svm_model():
+                # Save model with comprehensive metadata
+                if self.save_model_comprehensive():
+                    print("✅ Training completed successfully!")
+                    print("💾 Model and metadata saved to multiple locations")
+                    
+                    # Export training data
+                    self.export_training_data()
+                    
+                    # Show model performance
+                    self.show_model_performance()
+                else:
+                    print("⚠️ Training completed but save failed")
+            else:
+                print("❌ Training failed - check requirements")
+        else:
+            print(f"⚠️ Need at least 6 samples, have {total_samples}")
+
+    def show_comprehensive_status(self):
+        """Show detailed system status"""
+        print("\n📊 === COMPREHENSIVE SYSTEM STATUS ===")
+        
+        # Model status
+        print(f"🧠 Model Status:")
+        print(f"   Trained: {self.is_trained}")
+        print(f"   Training mode: {self.training_mode}")
+        if self.training_mode:
+            label_name = "NORMAL" if self.current_label == 0 else "ATTACK"
+            print(f"   Current label: {label_name}")
+        print(f"   Training samples: {len(self.training_data)}")
+        
+        # Packet statistics
+        print(f"\n📦 Packet Statistics:")
+        for key, value in self.packet_counters.items():
+            print(f"   {key.capitalize()}: {value}")
+        
+        # File status
+        print(f"\n📂 File Status:")
+        files_to_check = [
+            ("Primary model", self.model_file),
+            ("Backup model", self.backup_model_file),
+            ("Metadata", self.model_metadata_file),
+            ("Training data", self.training_export_file)
+        ]
+        
+        for name, filepath in files_to_check:
+            if os.path.exists(filepath):
+                size = os.path.getsize(filepath)
+                mtime = datetime.datetime.fromtimestamp(os.path.getmtime(filepath))
+                print(f"   {name}: ✅ {size} bytes, {mtime.strftime('%Y-%m-%d %H:%M')}")
+            else:
+                print(f"   {name}: ❌ Not found")
+        
+        # Network status
+        print(f"\n🌐 Network Status:")
+        print(f"   Blocked IPs: {len(self.blocked_ips)}")
+        if self.blocked_ips:
+            print(f"   Blocked: {', '.join(self.blocked_ips)}")
+        print(f"   Active ICMP sources: {len(self.icmp_stats)}")
+        
+        print("="*45)
+
+    def test_detection_mode(self):
+        """Enable and test detection mode"""
+        if not self.is_trained:
+            print("❌ No trained model available")
+            print("💡 Complete training first (commands 1, 2, 3)")
+            return
+        
+        print("🚨 DETECTION MODE ACTIVE")
+        print("💡 Generate test attack: h3 hping3 -1 --faster -c 20 h2")
+        print("💡 Generate normal traffic: h1 ping -c 5 h2")
+        print("🔍 Watch console for detection alerts")
+
+    def export_training_data(self):
+        """Export training data to JSON file"""
+        if not self.training_data:
+            print("❌ No training data to export")
+            return
+        
+        try:
+            export_data = {
+                'metadata': {
+                    'export_timestamp': time.time(),
+                    'export_datetime': datetime.datetime.now().isoformat(),
+                    'total_samples': len(self.training_data),
+                    'normal_samples': sum(1 for label in self.training_labels if label == 0),
+                    'attack_samples': sum(1 for label in self.training_labels if label == 1),
+                    'feature_names': ['packet_count', 'mean_length'],
+                    'time_window': self.TIME_WINDOW
+                },
+                'training_data': self.training_data,
+                'training_labels': self.training_labels,
+                'packet_counters': self.packet_counters.copy()
+            }
+            
+            with open(self.training_export_file, 'w') as f:
+                json.dump(export_data, f, indent=2)
+            
+            file_size = os.path.getsize(self.training_export_file)
+            print(f"📊 Training data exported: {self.training_export_file}")
+            print(f"   Size: {file_size} bytes")
+            print(f"   Samples: {len(self.training_data)}")
+            
+            self.logger.info("📊 Training data exported to: %s", self.training_export_file)
+            
+        except Exception as e:
+            print(f"❌ Export failed: {e}")
+            self.logger.error("❌ Training data export failed: %s", e)
+
+    def show_model_info(self):
+        """Show detailed model information"""
+        if not self.is_trained:
+            print("❌ No trained model available")
+            return
+        
+        print("\n🧠 === MODEL INFORMATION ===")
+        
+        if self.model_metadata:
+            meta = self.model_metadata
+            print(f"📅 Training date: {meta.get('training_datetime', 'Unknown')}")
+            print(f"📊 Total samples: {meta.get('total_samples', 'Unknown')}")
+            print(f"📊 Normal samples: {meta.get('normal_samples', 'Unknown')}")
+            print(f"📊 Attack samples: {meta.get('attack_samples', 'Unknown')}")
+            print(f"⏱️ Time window: {meta.get('time_window', 'Unknown')} seconds")
+            
+            if 'performance' in meta:
+                perf = meta['performance']
+                print(f"\n📈 Model Performance:")
+                print(f"   Training accuracy: {perf.get('training_accuracy', 'Unknown'):.2%}")
+                if 'cross_val_scores' in perf:
+                    scores = perf['cross_val_scores']
+                    print(f"   Cross-validation: {np.mean(scores):.2%} ± {np.std(scores):.2%}")
+        
+        if self.classifier:
+            print(f"\n🔧 Model Details:")
+            print(f"   Algorithm: {type(self.classifier).__name__}")
+            print(f"   Support vectors: {len(self.classifier.support_vectors_)}")
+            
+        print("="*35)
+
+    # [Previous methods like switch_features_handler, packet_in_handler, etc. remain the same]
+    
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+        """Handle switch connection"""
+        datapath = ev.msg.datapath
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        
+        # Install table-miss flow
+        match = parser.OFPMatch()
+        actions = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                        ofproto.OFPCML_NO_BUFFER)]
+        self.add_flow(datapath, 0, match, actions)
+        
+        # Install ARP handling
+        match_arp = parser.OFPMatch(eth_type=0x0806)
+        actions_arp = [parser.OFPActionOutput(ofproto.OFPP_FLOOD)]
+        self.add_flow(datapath, 100, match_arp, actions_arp)
+        
+        # Install ICMP monitoring
+        match_icmp = parser.OFPMatch(eth_type=0x0800, ip_proto=1)
+        actions_icmp = [parser.OFPActionOutput(ofproto.OFPP_CONTROLLER,
+                                             ofproto.OFPCML_NO_BUFFER)]
+        self.add_flow(datapath, 200, match_icmp, actions_icmp)
+        
+        self.logger.info("🔗 Switch %s connected", datapath.id)
+
+    def add_flow(self, datapath, priority, match, actions, timeout=0):
+        """Add flow entry to switch"""
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        
+        inst = [parser.OFPInstructionActions(ofproto.OFPIT_APPLY_ACTIONS, actions)]
+        mod = parser.OFPFlowMod(datapath=datapath, priority=priority,
+                              match=match, instructions=inst, idle_timeout=timeout)
+        datapath.send_msg(mod)
+
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def packet_in_handler(self, ev):
+        """Handle incoming packets"""
+        msg = ev.msg
+        datapath = msg.datapath
+        in_port = msg.match['in_port']
+        
+        self.packet_counters['total'] += 1
+        
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocol(ethernet.ethernet)
+        
+        if eth is None:
+            return
+        
+        # Learn MAC addresses
+        dpid = datapath.id
+        self.mac_to_port.setdefault(dpid, {})
+        self.mac_to_port[dpid][eth.src] = in_port
+        
+        # Handle ARP
+        if eth.ethertype == 0x0806:
+            self.packet_counters['arp'] += 1
+            return
+        
+        # Handle IPv4
+        if eth.ethertype == 0x0800:
+            self.packet_counters['ipv4'] += 1
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
+            
+            if ip_pkt:
+                # Check blocked IPs
+                if ip_pkt.src in self.blocked_ips:
+                    self.packet_counters['blocked'] += 1
+                    return
+                
+                # Process ICMP
+                if ip_pkt.proto == 1:
+                    self.packet_counters['icmp'] += 1
+                    icmp_pkt = pkt.get_protocol(icmp.icmp)
+                    if icmp_pkt:
+                        if self.analyze_icmp_packet(datapath, ip_pkt, icmp_pkt, len(msg.data)):
+                            return
+                
+                # Forward packet
+                self.forward_packet(datapath, in_port, eth.dst, msg.data)
+
+    def analyze_icmp_packet(self, datapath, ip_pkt, icmp_pkt, packet_length):
+        """Analyze ICMP packet for training or detection"""
+        src_ip = ip_pkt.src
+        current_time = time.time()
+        
+        # Update statistics
+        stats = self.icmp_stats[src_ip]
+        stats['packet_count'] += 1
+        stats['total_length'] += packet_length
+        stats['timestamps'].append(current_time)
+        stats['packet_lengths'].append(packet_length)
+        stats['last_seen'] = current_time
+        
+        # Clean old data
+        cutoff_time = current_time - self.TIME_WINDOW
+        stats['timestamps'] = [t for t in stats['timestamps'] if t > cutoff_time]
+        stats['packet_lengths'] = stats['packet_lengths'][-len(stats['timestamps']):]
+        
+        # Calculate features
+        packet_count = len(stats['timestamps'])
+        mean_length = statistics.mean(stats['packet_lengths']) if stats['packet_lengths'] else 0
+        
+        # Training mode
+        if self.training_mode and self.training_session_active and packet_count > 2:
+            return self.collect_training_sample(packet_count, mean_length, src_ip)
+        
+        # Detection mode
+        if self.is_trained and packet_count > 2:
+            prediction = self.predict_attack(packet_count, mean_length)
+            if prediction == 1:
+                return self.handle_attack_detection(datapath, src_ip, "SVM",
+                                                  [packet_count, mean_length])
+        
+        return False
+
+    def collect_training_sample(self, packet_count, mean_length, src_ip):
+        """Collect training sample"""
+        features = [packet_count, mean_length]
+        self.training_data.append(features)
+        self.training_labels.append(self.current_label)
+        self.training_samples += 1
+        
+        label_name = "NORMAL" if self.current_label == 0 else "ATTACK"
+        print(f"📚 Sample {self.training_samples}: [{packet_count},{mean_length:.1f}] -> {label_name}")
+        
+        self.logger.info("📚 Training sample %d: [%d,%.1f] -> %s from %s",
+                        self.training_samples, packet_count, mean_length, label_name, src_ip)
+        return True
+
+    def predict_attack(self, packet_count, mean_length):
+        """Make SVM prediction"""
+        if not self.is_trained or not self.classifier:
+            return 0
+        
+        try:
+            features = np.array([[packet_count, mean_length]])
+            prediction = self.classifier.predict(features)[0]
+            return prediction
+        except Exception as e:
+            self.logger.error("❌ Prediction error: %s", e)
+            return 0
+
+    def handle_attack_detection(self, datapath, src_ip, method, features):
+        """Handle detected attack"""
+        if src_ip in self.blocked_ips:
+            return True
+        
+        self.blocked_ips.add(src_ip)
+        self.packet_counters['attacks_detected'] += 1
+        
+        # Install blocking flow
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        
+        match = parser.OFPMatch(eth_type=0x0800, ipv4_src=src_ip)
+        self.add_flow(datapath, 1000, match, [], timeout=300)
+        
+        # Log detection
+        detection_record = {
+            'timestamp': time.time(),
+            'datetime': datetime.datetime.now().isoformat(),
+            'src_ip': src_ip,
+            'method': method,
+            'features': features,
+            'action': 'blocked'
+        }
+        self.detection_history.append(detection_record)
+        
+        print(f"🚨🚨🚨 ATTACK DETECTED: {src_ip} using {method} 🚨🚨🚨")
+        print(f"📊 Features: {features}")
+        print(f"🛡️ IP blocked for 5 minutes")
+        
+        self.logger.warning("🚨 ATTACK DETECTED: %s, method=%s, features=%s", 
+                          src_ip, method, features)
+        
+        self.packet_counters['attacks_blocked'] += 1
+        return True
+
+    def forward_packet(self, datapath, in_port, dst_mac, data):
+        """Forward packet using MAC learning"""
+        ofproto = datapath.ofproto
+        parser = datapath.ofproto_parser
+        dpid = datapath.id
+        
+        if dst_mac in self.mac_to_port[dpid]:
+            out_port = self.mac_to_port[dpid][dst_mac]
+        else:
+            out_port = ofproto.OFPP_FLOOD
+        
+        if out_port != in_port:
+            actions = [parser.OFPActionOutput(out_port)]
+            out = parser.OFPPacketOut(datapath=datapath,
+                                    buffer_id=ofproto.OFP_NO_BUFFER,
+                                    in_port=in_port, actions=actions, data=data)
+            datapath.send_msg(out)
+            self.packet_counters['forwarded'] += 1
+
+    def train_svm_model(self):
+        """Train SVM model with performance evaluation"""
+        if len(self.training_data) < 6:
+            return False
+        
+        try:
+            X = np.array(self.training_data)
+            y = np.array(self.training_labels)
+            
+            # Check class balance
+            normal_count = np.sum(y == 0)
+            attack_count = np.sum(y == 1)
+            
+            if normal_count == 0 or attack_count == 0:
+                print("❌ Need both normal and attack samples")
+                return False
+            
+            # Train SVM with probability estimation
+            self.classifier = SVC(kernel='rbf', gamma='scale', probability=True, random_state=42)
+            self.classifier.fit(X, y)
+            
+            # Calculate training accuracy
+            training_predictions = self.classifier.predict(X)
+            training_accuracy = np.mean(training_predictions == y)
+            
+            # Perform cross-validation if enough samples
+            cross_val_scores = []
+            if len(X) >= 10:
+                from sklearn.model_selection import cross_val_score
+                cross_val_scores = cross_val_score(self.classifier, X, y, cv=3)
+            
+            # Store model metadata
+            self.model_metadata = {
+                'training_timestamp': time.time(),
+                'training_datetime': datetime.datetime.now().isoformat(),
+                'total_samples': len(self.training_data),
+                'normal_samples': normal_count,
+                'attack_samples': attack_count,
+                'feature_names': ['packet_count', 'mean_length'],
+                'time_window': self.TIME_WINDOW,
+                'performance': {
+                    'training_accuracy': training_accuracy,
+                    'cross_val_scores': cross_val_scores.tolist() if len(cross_val_scores) > 0 else []
+                }
+            }
+            
+            self.is_trained = True
+            
+            print(f"🧠 SVM Training Complete:")
+            print(f"   Samples: {len(self.training_data)} ({normal_count} normal, {attack_count} attack)")
+            print(f"   Training accuracy: {training_accuracy:.2%}")
+            if len(cross_val_scores) > 0:
+                print(f"   Cross-validation: {np.mean(cross_val_scores):.2%} ± {np.std(cross_val_scores):.2%}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"❌ Training failed: {e}")
+            self.logger.error("❌ SVM training failed: %s", e)
+            return False
+
+    def save_model_comprehensive(self):
+        """Save model with comprehensive metadata to multiple locations"""
+        if not self.is_trained or not self.classifier:
+            return False
+        
+        # Prepare complete model data
+        model_data = {
+            'classifier': self.classifier,
+            'training_data': self.training_data,
+            'training_labels': self.training_labels,
+            'metadata': self.model_metadata,
+            'detection_history': self.detection_history[-100:],  # Last 100 detections
+            'packet_counters': self.packet_counters.copy()
+        }
+        
+        saved_locations = []
+        
+        # Save to primary location
+        try:
+            with open(self.model_file, 'wb') as f:
+                pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            if os.path.exists(self.model_file):
+                size = os.path.getsize(self.model_file)
+                saved_locations.append(f"Primary: {self.model_file} ({size} bytes)")
+        except Exception as e:
+            self.logger.error("❌ Failed to save to primary location: %s", e)
+        
+        # Save to backup location
+        try:
+            with open(self.backup_model_file, 'wb') as f:
+                pickle.dump(model_data, f, protocol=pickle.HIGHEST_PROTOCOL)
+            
+            if os.path.exists(self.backup_model_file):
+                size = os.path.getsize(self.backup_model_file)
+                saved_locations.append(f"Backup: {self.backup_model_file} ({size} bytes)")
+        except Exception as e:
+            self.logger.error("❌ Failed to save to backup location: %s", e)
+        
+        # Save metadata separately
+        try:
+            with open(self.model_metadata_file, 'w') as f:
+                json.dump(self.model_metadata, f, indent=2)
+            
+            with open(self.backup_metadata_file, 'w') as f:
+                json.dump(self.model_metadata, f, indent=2)
+        except Exception as e:
+            self.logger.error("❌ Failed to save metadata: %s", e)
+        
+        if saved_locations:
+            print("💾 Model saved to:")
+            for location in saved_locations:
+                print(f"   {location}")
+            return True
+        else:
+            print("❌ Failed to save model to any location")
+            return False
+
+    def load_model(self):
+        """Load model from available locations"""
+        model_paths = [self.model_file, self.backup_model_file]
+        
+        for model_path in model_paths:
+            if os.path.exists(model_path):
+                try:
+                    with open(model_path, 'rb') as f:
+                        model_data = pickle.load(f)
+                    
+                    self.classifier = model_data['classifier']
+                    self.training_data = model_data.get('training_data', [])
+                    self.training_labels = model_data.get('training_labels', [])
+                    self.model_metadata = model_data.get('metadata', {})
+                    self.detection_history = model_data.get('detection_history', [])
+                    
+                    # Update packet counters if available
+                    saved_counters = model_data.get('packet_counters', {})
+                    for key in self.packet_counters:
+                        if key in saved_counters:
+                            self.packet_counters[key] = saved_counters[key]
+                    
+                    self.is_trained = True
+                    
+                    print(f"📂 Model loaded from: {model_path}")
+                    print(f"📊 Training samples: {len(self.training_data)}")
+                    if self.model_metadata:
+                        print(f"📅 Trained: {self.model_metadata.get('training_datetime', 'Unknown')}")
+                    
+                    self.logger.info("📂 Model loaded successfully from: %s", model_path)
+                    return True
+                    
+                except Exception as e:
+                    self.logger.warning("⚠️ Failed to load from %s: %s", model_path, e)
+        
+        print("📝 No existing model found - ready for training")
+        return False
+
+    def show_model_performance(self):
+        """Show detailed model performance metrics"""
+        if not self.is_trained or len(self.training_data) < 6:
+            return
+        
+        try:
+            X = np.array(self.training_data)
+            y = np.array(self.training_labels)
+            
+            predictions = self.classifier.predict(X)
+            
+            print(f"\n📈 Model Performance Analysis:")
+            print(f"📊 Classification Report:")
+            report = classification_report(y, predictions, target_names=['Normal', 'Attack'])
+            print(report)
+            
+            print(f"📊 Confusion Matrix:")
+            cm = confusion_matrix(y, predictions)
+            print(f"   True Normal, Pred Normal: {cm[0][0]}")
+            print(f"   True Normal, Pred Attack: {cm[0][1]}")
+            print(f"   True Attack, Pred Normal: {cm[1][0]}")
+            print(f"   True Attack, Pred Attack: {cm[1][1]}")
+            
+        except Exception as e:
+            self.logger.error("❌ Performance analysis failed: %s", e)
+
+    def auto_save_service(self):
+        """Automatic model saving service"""
+        while True:
+            time.sleep(300)  # Save every 5 minutes
+            if self.is_trained and len(self.training_data) > 0:
+                try:
+                    self.save_model_comprehensive()
+                    self.logger.debug("🔄 Auto-save completed")
+                except Exception as e:
+                    self.logger.error("❌ Auto-save failed: %s", e)
+
+    def report_statistics(self):
+        """Report periodic statistics"""
+        while True:
+            time.sleep(60)  # Report every minute
+            
+            self.logger.info("📊 Stats: Total=%d, ICMP=%d, Blocked=%d, Attacks=%d",
+                           self.packet_counters['total'],
+                           self.packet_counters['icmp'],
+                           self.packet_counters['blocked'],
+                           self.packet_counters['attacks_detected'])
+
+    def cleanup_old_data(self):
+        """Clean up old statistics and detection history"""
+        while True:
+            time.sleep(300)  # Clean every 5 minutes
+            current_time = time.time()
+            
+            # Remove old ICMP statistics
+            old_sources = [src for src, stats in self.icmp_stats.items()
+                          if current_time - stats['last_seen'] > 600]
+            
+            for src in old_sources:
+                del self.icmp_stats[src]
+            
+            # Limit detection history
+            if len(self.detection_history) > 1000:
+                self.detection_history = self.detection_history[-500:]
+
+
+if __name__ == '__main__':
+    import sys
+    sys.argv = ['enhanced_icmp_detector.py', '--verbose']
+    app_manager.main()
